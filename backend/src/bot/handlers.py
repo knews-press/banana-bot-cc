@@ -337,7 +337,9 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
                 return
             port = pending_auth["port"]
             proc = pending_auth["proc"]
-            status_msg = await update.message.reply_text("🔐 Verarbeite Autorisierung…")
+            status_msg = await update.message.reply_text(
+                "🔐 Verarbeite Autorisierung… (kann bis zu 90s dauern)"
+            )
             try:
                 ok = await complete_cli_auth(callback_url, port, proc)
                 context.user_data.pop("pending_auth_code", None)

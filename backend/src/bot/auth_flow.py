@@ -227,6 +227,7 @@ async def complete_cli_auth(
     The CLI exchanges the code and saves credentials to ~/.claude/.credentials.json.
 
     Returns True if credentials were saved successfully.
+    Raises ValueError with a descriptive message on known failure modes.
     """
     parsed = urllib.parse.urlparse(callback_url.strip())
     internal_url = f"http://localhost:{port}/callback"
@@ -235,28 +236,97 @@ async def complete_cli_auth(
 
     logger.info("Forwarding callback to CLI server", url=internal_url)
 
-    async with aiohttp.ClientSession() as session:
-        try:
-            await session.get(
-                internal_url,
-                timeout=aiohttp.ClientTimeout(total=15),
-                allow_redirects=False,
-            )
-        except aiohttp.ClientConnectionError:
-            pass  # CLI closes connection after processing — expected
-        except Exception as e:
-            logger.warning("Callback forwarding error", error=str(e))
+    response_status: int | None = None
 
-    # Poll for credentials (up to 10s)
-    for _ in range(20):
+    try:
+        async with aiohttp.ClientSession() as session:
+            try:
+                resp = await session.get(
+                    internal_url,
+                    timeout=aiohttp.ClientTimeout(total=120),
+                    allow_redirects=False,
+                )
+                response_status = resp.status
+                logger.info(
+                    "CLI server responded",
+                    status=resp.status,
+                    location=resp.headers.get("Location", ""),
+                )
+                if resp.status == 400:
+                    body = await resp.text()
+                    logger.error("CLI callback rejected", status=400, body=body[:200])
+                    raise ValueError(
+                        f"CLI hat den Callback abgelehnt (400): {body[:120]}"
+                    )
+            except aiohttp.ServerDisconnectedError:
+                # CLI closes the connection right after reading the request — expected
+                logger.info("CLI server closed connection (processing in background)")
+            except aiohttp.ClientConnectorError as e:
+                logger.error("CLI server not reachable", port=port, error=str(e))
+                raise ValueError(
+                    f"CLI-Server auf Port {port} nicht erreichbar (Connection refused). "
+                    "Der CLI-Prozess ist möglicherweise abgestürzt oder hat das Timeout erreicht. "
+                    "Bitte eine neue Nachricht schicken, um die Authentifizierung neu zu starten."
+                )
+            except asyncio.TimeoutError:
+                # CLI is taking longer than 120s — very unusual; keep polling anyway
+                logger.warning("CLI callback request timed out after 120s", port=port)
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.warning("Callback session error", error=str(e))
+
+    # Poll for credentials (up to 90s — CLI needs time for token exchange + profile fetch + qX6)
+    for _ in range(180):
         await asyncio.sleep(0.5)
         if is_authenticated():
             logger.info("CLI auth: credentials saved")
-            break
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            return True
 
     try:
         proc.kill()
     except Exception:
         pass
 
-    return is_authenticated()
+    # Credentials still missing — collect debug info to report back
+    debug_info = _credentials_debug_info()
+    if response_status == 302:
+        raise ValueError(
+            f"CLI hat den Code verarbeitet (302 ✓), aber keine gültigen Credentials gespeichert.\n"
+            f"{debug_info}\n"
+            "Mögliche Ursache: Token-Exchange mit Anthropic fehlgeschlagen."
+        )
+    elif response_status == 200:
+        raise ValueError(
+            f"CLI hat den Code verarbeitet (200 ✓), aber keine gültigen Credentials gespeichert.\n"
+            f"{debug_info}"
+        )
+    else:
+        raise ValueError(
+            f"Keine Credentials nach 90s Polling. CLI-Response-Status: {response_status}.\n"
+            f"{debug_info}"
+        )
+
+
+def _credentials_debug_info() -> str:
+    """Return a debug string about the current credentials file state."""
+    if not _CREDENTIALS_FILE.exists():
+        return "Credentials-Datei existiert nicht."
+    try:
+        data = json.loads(_CREDENTIALS_FILE.read_text())
+        oauth = data.get("claudeAiOauth", {})
+        has_token = bool(oauth.get("accessToken"))
+        expires_at = oauth.get("expiresAt", 0)
+        now_ms = int(time.time() * 1000)
+        diff_s = (expires_at - now_ms) // 1000 if isinstance(expires_at, (int, float)) else "?"
+        return (
+            f"Credentials-Datei: access_token={'✓' if has_token else '✗'}, "
+            f"expiresAt={expires_at} (Typ: {type(expires_at).__name__}), "
+            f"läuft in {diff_s}s ab"
+        )
+    except Exception as ex:
+        return f"Credentials-Datei fehlerhaft: {ex}"
