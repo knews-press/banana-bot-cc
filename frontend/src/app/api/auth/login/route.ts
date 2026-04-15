@@ -47,7 +47,7 @@ export async function POST(request: NextRequest) {
       }
 
       const token = await createMagicLinkToken(user.email, instance);
-      const magicLink = `${getBaseUrl()}/api/auth/verify?token=${token}`;
+      const magicLink = `${getBaseUrl()}/api/auth/verify?token=${token.trim()}`;
 
       // Send magic link via the bot backend's Telegram integration
       try {

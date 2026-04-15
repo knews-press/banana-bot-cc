@@ -7,7 +7,7 @@
 
 /** Public base URL for magic links, redirects, etc. */
 export function getBaseUrl(): string {
-  return process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000";
+  return (process.env.NEXT_PUBLIC_BASE_URL || "http://localhost:3000").trim().replace(/\/$/, "");
 }
 
 /** Shared secret for internal API calls (bot <-> web). */
