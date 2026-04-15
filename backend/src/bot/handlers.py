@@ -322,10 +322,9 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
         # ── Claude auth flow ───────────────────────────────────────────────
         pending_auth = context.user_data.get("pending_auth_code")
         if pending_auth:
-            if not msg.text:
+            if not msg.text or not msg.text.strip():
                 await update.message.reply_text(
-                    "Bitte schick mir die vollständige URL aus der Adresszeile "
-                    "(beginnt mit https://platform.claude.com/oauth/code/callback?code=...)."
+                    "Bitte schick mir den Code, der dir auf der Anthropic-Seite angezeigt wird."
                 )
                 return
             code_verifier = pending_auth.get("code_verifier")
@@ -362,10 +361,7 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
                     "1. Öffne diesen Link im Browser:\n\n"
                     f"{auth_url}\n\n"
                     "2. Melde dich an und autorisiere den Zugriff.\n\n"
-                    "3. Dein Browser landet auf einer Seite bei platform.claude.com.\n"
-                    "   Kopiere die vollständige URL aus der Adresszeile\n"
-                    "   (beginnt mit https://platform.claude.com/oauth/code/callback?code=...)\n"
-                    "   und schick sie mir."
+                    "3. Anthropic zeigt dir einen Code an — kopiere ihn und schick ihn mir."
                 )
             except Exception as e:
                 logger.error("PKCE auth start failed", error=str(e))

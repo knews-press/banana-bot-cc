@@ -175,7 +175,7 @@ async def complete_pkce_auth(
     code = user_input
     received_state: str | None = None
 
-    # Try to parse as URL (Kevin pastes the full address-bar URL)
+    # If a full URL was pasted instead of a bare code, extract the code param
     try:
         parsed = urllib.parse.urlparse(user_input)
         if parsed.scheme in ("http", "https") and parsed.netloc:
@@ -183,14 +183,15 @@ async def complete_pkce_auth(
             if "code" in qs:
                 code = qs["code"][0]
                 received_state = qs.get("state", [""])[0] or None
+                if received_state and received_state != expected_state:
+                    raise ValueError(
+                        "State-Parameter stimmt nicht überein — bitte eine neue Nachricht "
+                        "schicken um den Flow neu zu starten."
+                    )
+    except ValueError:
+        raise
     except Exception:
         pass  # treat entire input as bare code
-
-    if received_state and received_state != expected_state:
-        raise ValueError(
-            "State-Parameter stimmt nicht überein — bitte die URL erneut kopieren "
-            "oder eine neue Nachricht schicken um den Flow neu zu starten."
-        )
 
     logger.info("Starting PKCE token exchange", code_len=len(code))
 
