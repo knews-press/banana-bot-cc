@@ -28,8 +28,8 @@ logger = structlog.get_logger()
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _AUTH_URL = "https://claude.com/cai/oauth/authorize"
 _TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-_MANUAL_REDIRECT_URL = "http://localhost/callback"
-_SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
+_MANUAL_REDIRECT_URL = "https://platform.claude.com/oauth/code/callback"
+_SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
 _CREDENTIALS_FILE = Path("/root/.claude/.credentials.json")
 

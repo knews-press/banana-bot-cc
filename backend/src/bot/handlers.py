@@ -349,10 +349,8 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
                 "🔐 Claude ist noch nicht eingeloggt.\n\n"
                 "Öffne diesen Link im Browser:\n\n"
                 f"{auth_url}\n\n"
-                "Nach der Autorisierung leitet dich der Browser auf "
-                "http://localhost/callback?code=... weiter — das zeigt einen "
-                "Verbindungsfehler, das ist normal.\n\n"
-                "Kopiere die vollständige URL aus der Adresszeile und schick sie mir."
+                "Melde dich an, bestätige die Autorisierung, "
+                "und schick mir den Code, der danach angezeigt wird."
             )
             return
         # ── End of Claude auth flow ────────────────────────────────────────
