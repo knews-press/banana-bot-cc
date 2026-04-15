@@ -20,9 +20,9 @@ logger = structlog.get_logger()
 
 # ── OAuth config (extracted from Claude Code CLI prod config) ──────────────────
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-_AUTH_URL = "https://claude.ai/oauth/authorize"
-_TOKEN_URL = "https://claude.ai/v1/oauth/token"
-_MANUAL_REDIRECT_URL = "https://claude.ai/oauth/code/callback"
+_AUTH_URL = "https://platform.claude.com/oauth/authorize"
+_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+_MANUAL_REDIRECT_URL = "https://platform.claude.com/oauth/code/callback"
 _SCOPES = "user:inference user:profile user:sessions:claude_code user:mcp_servers user:file_upload"
 
 _CREDENTIALS_FILE = Path("/root/.claude/.credentials.json")
