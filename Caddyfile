@@ -1,0 +1,12 @@
+# Replace with your domain
+your-domain.com {
+    # Web UI
+    handle /* {
+        reverse_proxy frontend:3000
+    }
+
+    # Backend API (used by Web UI internally — not typically exposed)
+    handle /api/v1/* {
+        reverse_proxy backend:8080
+    }
+}

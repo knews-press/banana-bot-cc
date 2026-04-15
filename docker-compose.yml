@@ -1,0 +1,108 @@
+services:
+  # ━━━ Core ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    ports:
+      - "${BACKEND_PORT:-8080}:8080"
+    volumes:
+      - backend-data:/root
+      - ./config:/app/config:ro
+    env_file: .env
+    environment:
+      MYSQL_HOST: mysql
+      ES_HOST: elasticsearch:9200
+      NEO4J_HOST: neo4j
+      SEARXNG_URL: http://searxng:8080
+      INTERNAL_API_URL: http://localhost:8080
+      SYSTEM_PROMPT_FILE: /app/config/system-prompt.md
+    depends_on:
+      mysql:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    env_file: .env
+    environment:
+      MYSQL_HOST: mysql
+      MYSQL_PORT: "3306"
+      ES_URL: http://elasticsearch:9200
+      BACKEND_URL: http://backend:8080
+      ALLOWED_INSTANCES: ${INSTANCE_NAME:-banana-bot}
+      NEXT_PUBLIC_BASE_URL: ${PUBLIC_URL:-http://localhost:3000}
+    depends_on:
+      - backend
+
+  mysql:
+    image: mysql:8
+    restart: unless-stopped
+    volumes:
+      - mysql-data:/var/lib/mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-claude_code}
+      MYSQL_USER: ${MYSQL_USER:-bot}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  elasticsearch:
+    image: elasticsearch:8.15.0
+    restart: unless-stopped
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # ━━━ Optional (activate via --profile) ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  neo4j:
+    image: neo4j:5-community
+    restart: unless-stopped
+    profiles: ["graph"]
+    volumes:
+      - neo4j-data:/data
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD:-changeme}
+      NEO4J_PLUGINS: "[]"
+
+  searxng:
+    image: searxng/searxng:latest
+    restart: unless-stopped
+    profiles: ["search"]
+    volumes:
+      - ./config/searxng:/etc/searxng:ro
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    profiles: ["proxy"]
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+
+volumes:
+  backend-data:
+  mysql-data:
+  es-data:
+  neo4j-data:
+  caddy-data:
