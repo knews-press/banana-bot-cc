@@ -23,7 +23,7 @@ from .media import MediaProcessor
 
 from .auth_flow import (
     is_authenticated, ensure_authenticated,
-    start_cli_auth, complete_cli_auth,
+    start_pkce_auth, complete_pkce_auth,
     save_credentials,
 )
 from .commands.dispatch import (
@@ -324,58 +324,52 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
         if pending_auth:
             if not msg.text:
                 await update.message.reply_text(
-                    "Bitte schick mir die vollständige URL aus der Adresszeile."
+                    "Bitte schick mir die vollständige URL aus der Adresszeile "
+                    "(beginnt mit https://platform.claude.com/oauth/code/callback?code=...)."
                 )
                 return
-            callback_url = msg.text.strip()
-            if not (callback_url.startswith("http://localhost")
-                    or callback_url.startswith("http://127.0.0.1")):
-                await update.message.reply_text(
-                    "Bitte die vollständige URL aus der Adresszeile schicken "
-                    "(beginnt mit http://localhost:...)."
-                )
-                return
-            port = pending_auth["port"]
-            proc = pending_auth["proc"]
-            status_msg = await update.message.reply_text(
-                "🔐 Verarbeite Autorisierung… (kann bis zu 90s dauern)"
-            )
-            try:
-                ok = await complete_cli_auth(callback_url, port, proc)
+            code_verifier = pending_auth.get("code_verifier")
+            state = pending_auth.get("state", "")
+            if not code_verifier:
+                # Stale session from old flow — clear and ask to restart
                 context.user_data.pop("pending_auth_code", None)
-                if ok:
-                    await status_msg.edit_text(
-                        "✅ Claude erfolgreich authentifiziert! Du kannst jetzt loslegen."
-                    )
-                else:
-                    await status_msg.edit_text(
-                        "❌ Credentials wurden nicht gespeichert. Bitte erneut versuchen."
-                    )
+                await update.message.reply_text(
+                    "⚠️ Auth-Session abgelaufen. Bitte eine neue Nachricht schicken."
+                )
+                return
+            status_msg = await update.message.reply_text("🔐 Verarbeite Code…")
+            try:
+                await complete_pkce_auth(msg.text.strip(), code_verifier, state)
+                context.user_data.pop("pending_auth_code", None)
+                await status_msg.edit_text(
+                    "✅ Claude erfolgreich authentifiziert! Du kannst jetzt loslegen."
+                )
             except Exception as e:
-                logger.error("CLI auth completion failed", error=str(e))
+                logger.error("PKCE auth completion failed", error=str(e))
                 await status_msg.edit_text(f"❌ Fehler: {e}")
                 context.user_data.pop("pending_auth_code", None)
             return
 
         if not await ensure_authenticated():
-            status_msg = await update.message.reply_text(
-                "🔐 Starte Claude-Authentifizierung…"
-            )
             try:
-                auth_url, port, proc = await start_cli_auth()
-                context.user_data["pending_auth_code"] = {"port": port, "proc": proc}
-                await status_msg.edit_text(
+                auth_url, code_verifier, state = start_pkce_auth()
+                context.user_data["pending_auth_code"] = {
+                    "code_verifier": code_verifier,
+                    "state": state,
+                }
+                await update.message.reply_text(
                     "🔐 Claude ist noch nicht eingeloggt.\n\n"
-                    "Öffne diesen Link im Browser:\n\n"
+                    "1. Öffne diesen Link im Browser:\n\n"
                     f"{auth_url}\n\n"
-                    "Nach der Autorisierung leitet dich der Browser auf "
-                    f"http://localhost:{port}/callback?code=... weiter — "
-                    "das zeigt einen Verbindungsfehler, das ist normal.\n\n"
-                    "Kopiere die vollständige URL aus der Adresszeile und schick sie mir."
+                    "2. Melde dich an und autorisiere den Zugriff.\n\n"
+                    "3. Dein Browser landet auf einer Seite bei platform.claude.com.\n"
+                    "   Kopiere die vollständige URL aus der Adresszeile\n"
+                    "   (beginnt mit https://platform.claude.com/oauth/code/callback?code=...)\n"
+                    "   und schick sie mir."
                 )
             except Exception as e:
-                logger.error("CLI auth start failed", error=str(e))
-                await status_msg.edit_text(
+                logger.error("PKCE auth start failed", error=str(e))
+                await update.message.reply_text(
                     f"❌ Fehler beim Starten der Authentifizierung: {e}"
                 )
             return

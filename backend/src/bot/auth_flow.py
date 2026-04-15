@@ -1,13 +1,19 @@
-"""Interactive Claude auth flow via CLI subprocess.
+"""Claude OAuth PKCE flow for Telegram-based authentication.
 
-When Claude is not authenticated, the bot launches `claude auth login`,
-captures its local server port, sends Kevin the browser auth URL, and when
-Kevin pastes back the localhost callback URL (which his browser can't reach),
-the bot makes the internal HTTP request to the CLI's local server on that port.
+Flow:
+1. Bot generates PKCE pair + state, builds authorization URL with
+   redirect_uri=https://platform.claude.com/oauth/code/callback
+2. Kevin opens the URL, authorizes on claude.com
+3. Browser redirects to https://platform.claude.com/oauth/code/callback?code=...&state=...
+   (this page loads fine — no "connection refused")
+4. Kevin copies the full URL from the address bar and sends it to the bot
+5. Bot extracts the code, exchanges it for tokens, saves credentials
 """
 
-import asyncio
+import base64
+import hashlib
 import json
+import os
 import time
 import urllib.parse
 from pathlib import Path
@@ -19,11 +25,15 @@ logger = structlog.get_logger()
 
 _CREDENTIALS_FILE = Path("/root/.claude/.credentials.json")
 
-# Token URL used for refresh only
+# OAuth endpoints and client config (same as Claude Code CLI prod config)
+_AUTH_URL = "https://claude.com/cai/oauth/authorize"
 _TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_MANUAL_REDIRECT_URI = "https://platform.claude.com/oauth/code/callback"
 _SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
+
+# ── Credential helpers ─────────────────────────────────────────────────────
 
 def is_authenticated() -> bool:
     """Return True if valid, non-expired Claude credentials exist."""
@@ -36,19 +46,16 @@ def is_authenticated() -> bool:
             return False
         expires_at = oauth.get("expiresAt", 0)
         # expiresAt is in milliseconds; reject if expiring within 5 minutes
-        if expires_at and expires_at < (time.time() * 1000 + 300_000):
-            return False
+        if expires_at and isinstance(expires_at, (int, float)):
+            if expires_at < (time.time() * 1000 + 300_000):
+                return False
         return True
     except Exception:
         return False
 
 
 async def try_refresh_token() -> bool:
-    """Try to silently refresh the access token using the stored refresh token.
-
-    Returns True if the refresh succeeded and new credentials were saved,
-    False if the refresh failed (user must re-authenticate manually).
-    """
+    """Try to silently refresh the access token using the stored refresh token."""
     if not _CREDENTIALS_FILE.exists():
         return False
     try:
@@ -68,6 +75,7 @@ async def try_refresh_token() -> bool:
                     "refresh_token": refresh_token,
                     "client_id": _CLIENT_ID,
                 },
+                timeout=aiohttp.ClientTimeout(total=30),
             )
             if resp.status != 200:
                 text = await resp.text()
@@ -83,21 +91,14 @@ async def try_refresh_token() -> bool:
 
 
 async def ensure_authenticated() -> bool:
-    """Return True if valid credentials exist or could be refreshed silently.
-
-    Call this instead of is_authenticated() in the message handler so that
-    an expired token is renewed automatically without user interaction.
-    """
+    """Return True if valid credentials exist or could be refreshed silently."""
     if is_authenticated():
         return True
     return await try_refresh_token()
 
 
 def save_credentials(token_data: dict) -> None:
-    """Write tokens to ~/.claude/.credentials.json.
-
-    Preserves any existing top-level keys (e.g. other auth providers).
-    """
+    """Write tokens to ~/.claude/.credentials.json (CLI-compatible format)."""
     _CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
 
     existing: dict = {}
@@ -111,7 +112,7 @@ def save_credentials(token_data: dict) -> None:
     existing["claudeAiOauth"] = {
         "accessToken": token_data.get("access_token"),
         "refreshToken": token_data.get("refresh_token"),
-        "expiresAt": int((time.time() + expires_in) * 1000),
+        "expiresAt": int((time.time() + expires_in) * 1000),  # milliseconds, same as CLI
         "scopes": token_data.get("scope", _SCOPES).split(),
         "subscriptionType": token_data.get("subscription_type", "unknown"),
         "rateLimitTier": token_data.get("rate_limit_tier", "default"),
@@ -121,212 +122,117 @@ def save_credentials(token_data: dict) -> None:
     logger.info("Claude credentials saved", path=str(_CREDENTIALS_FILE))
 
 
-def _get_listening_ports() -> set[int]:
-    """Return all ports currently in TCP LISTEN state."""
-    ports = set()
-    for path in ['/proc/net/tcp', '/proc/net/tcp6']:
-        try:
-            with open(path, 'r') as f:
-                for line in f.readlines()[1:]:
-                    parts = line.split()
-                    if len(parts) >= 4 and parts[3] == '0A':  # LISTEN
-                        port_hex = parts[1].split(':')[1]
-                        ports.add(int(port_hex, 16))
-        except Exception:
-            pass
-    return ports
+# ── PKCE auth flow ─────────────────────────────────────────────────────────
+
+def _pkce_pair() -> tuple[str, str]:
+    """Return (code_verifier, code_challenge) for PKCE S256."""
+    verifier = base64.urlsafe_b64encode(os.urandom(32)).rstrip(b"=").decode()
+    digest = hashlib.sha256(verifier.encode()).digest()
+    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    return verifier, challenge
 
 
-async def start_cli_auth() -> tuple[str, int, asyncio.subprocess.Process]:
+def start_pkce_auth() -> tuple[str, str, str]:
     """
-    Launch 'claude auth login', detect its local server port, and return
-    (browser_auth_url, port, process).
+    Build the Claude AI OAuth authorization URL.
 
-    browser_auth_url uses http://localhost:{port}/callback so Kevin's browser
-    redirects there after authorization. Kevin copies the full URL from the
-    address bar (connection refused is expected) and sends it back.
+    Uses redirect_uri=https://platform.claude.com/oauth/code/callback so that
+    Kevin's browser lands on a real Anthropic page (no "connection refused").
+    Kevin copies the full URL from the address bar and sends it back.
+
+    Returns (auth_url, code_verifier, state).
     """
-    import os
-    ports_before = _get_listening_ports()
+    code_verifier, code_challenge = _pkce_pair()
+    state = base64.urlsafe_b64encode(os.urandom(24)).rstrip(b"=").decode()
 
-    env = {**os.environ, 'NO_COLOR': '1', 'TERM': 'dumb'}
-    proc = await asyncio.create_subprocess_exec(
-        'claude', 'auth', 'login',
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        env=env,
-    )
-
-    # Read until CLI prints the "visit:" line with the manual URL
-    manual_url = None
-    try:
-        async def _read_url():
-            nonlocal manual_url
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-                text = line.decode('utf-8', errors='replace').strip()
-                logger.debug("claude auth login", line=text)
-                if 'visit:' in text.lower():
-                    manual_url = text.split('visit:', 1)[1].strip()
-                    return
-        await asyncio.wait_for(_read_url(), timeout=20)
-    except asyncio.TimeoutError:
-        proc.kill()
-        raise ValueError("Timeout: CLI hat keine Auth-URL ausgegeben (20s)")
-
-    if not manual_url:
-        proc.kill()
-        raise ValueError("CLI hat die Auth-URL nicht ausgegeben")
-
-    # Give the server a moment to bind, then detect new listening port
-    await asyncio.sleep(1.0)
-    ports_after = _get_listening_ports()
-    new_ports = ports_after - ports_before
-
-    if not new_ports:
-        proc.kill()
-        raise ValueError("Konnte den CLI-Port nicht ermitteln")
-
-    port = max(new_ports)
-    logger.info("CLI local server detected", port=port)
-
-    # Construct browser URL: same params as manual URL but with localhost redirect
-    try:
-        parsed = urllib.parse.urlparse(manual_url)
-        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
-        params['redirect_uri'] = [f'http://localhost:{port}/callback']
-        new_query = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
-        browser_url = f"https://claude.com/cai/oauth/authorize?{new_query}"
-    except Exception as e:
-        proc.kill()
-        raise ValueError(f"URL-Konstruktion fehlgeschlagen: {e}")
-
-    # Drain stdout in background to prevent buffer blocking
-    async def _drain():
-        try:
-            while True:
-                line = await proc.stdout.readline()
-                if not line:
-                    break
-        except Exception:
-            pass
-    asyncio.ensure_future(_drain())
-
-    return browser_url, port, proc
+    params = urllib.parse.urlencode({
+        "code": "true",
+        "client_id": _CLIENT_ID,
+        "response_type": "code",
+        "redirect_uri": _MANUAL_REDIRECT_URI,
+        "scope": _SCOPES,
+        "code_challenge": code_challenge,
+        "code_challenge_method": "S256",
+        "state": state,
+    })
+    auth_url = f"{_AUTH_URL}?{params}"
+    logger.info("PKCE auth URL generated", challenge_prefix=code_challenge[:8], state_prefix=state[:8])
+    return auth_url, code_verifier, state
 
 
-async def complete_cli_auth(
-    callback_url: str,
-    port: int,
-    proc: asyncio.subprocess.Process,
-) -> bool:
+async def complete_pkce_auth(
+    user_input: str,
+    code_verifier: str,
+    expected_state: str,
+) -> None:
     """
-    Forward Kevin's callback URL to the CLI's local server (same container).
-    The CLI exchanges the code and saves credentials to ~/.claude/.credentials.json.
+    Exchange the authorization code for tokens and save credentials.
 
-    Returns True if credentials were saved successfully.
-    Raises ValueError with a descriptive message on known failure modes.
+    user_input: full callback URL from address bar, OR just the authorization code.
+    Raises ValueError with a descriptive message on failure.
     """
-    parsed = urllib.parse.urlparse(callback_url.strip())
-    internal_url = f"http://localhost:{port}/callback"
-    if parsed.query:
-        internal_url += f"?{parsed.query}"
+    user_input = user_input.strip()
+    code = user_input
+    received_state: str | None = None
 
-    logger.info("Forwarding callback to CLI server", url=internal_url)
-
-    response_status: int | None = None
-
+    # Try to parse as URL (Kevin pastes the full address-bar URL)
     try:
-        async with aiohttp.ClientSession() as session:
-            try:
-                resp = await session.get(
-                    internal_url,
-                    timeout=aiohttp.ClientTimeout(total=120),
-                    allow_redirects=False,
-                )
-                response_status = resp.status
-                logger.info(
-                    "CLI server responded",
-                    status=resp.status,
-                    location=resp.headers.get("Location", ""),
-                )
-                if resp.status == 400:
-                    body = await resp.text()
-                    logger.error("CLI callback rejected", status=400, body=body[:200])
-                    raise ValueError(
-                        f"CLI hat den Callback abgelehnt (400): {body[:120]}"
-                    )
-            except aiohttp.ServerDisconnectedError:
-                # CLI closes the connection right after reading the request — expected
-                logger.info("CLI server closed connection (processing in background)")
-            except aiohttp.ClientConnectorError as e:
-                logger.error("CLI server not reachable", port=port, error=str(e))
-                raise ValueError(
-                    f"CLI-Server auf Port {port} nicht erreichbar (Connection refused). "
-                    "Der CLI-Prozess ist möglicherweise abgestürzt oder hat das Timeout erreicht. "
-                    "Bitte eine neue Nachricht schicken, um die Authentifizierung neu zu starten."
-                )
-            except asyncio.TimeoutError:
-                # CLI is taking longer than 120s — very unusual; keep polling anyway
-                logger.warning("CLI callback request timed out after 120s", port=port)
-    except ValueError:
-        raise
-    except Exception as e:
-        logger.warning("Callback session error", error=str(e))
-
-    # Poll for credentials (up to 90s — CLI needs time for token exchange + profile fetch + qX6)
-    for _ in range(180):
-        await asyncio.sleep(0.5)
-        if is_authenticated():
-            logger.info("CLI auth: credentials saved")
-            try:
-                proc.kill()
-            except Exception:
-                pass
-            return True
-
-    try:
-        proc.kill()
+        parsed = urllib.parse.urlparse(user_input)
+        if parsed.scheme in ("http", "https") and parsed.netloc:
+            qs = urllib.parse.parse_qs(parsed.query)
+            if "code" in qs:
+                code = qs["code"][0]
+                received_state = qs.get("state", [""])[0] or None
     except Exception:
-        pass
+        pass  # treat entire input as bare code
 
-    # Credentials still missing — collect debug info to report back
-    debug_info = _credentials_debug_info()
-    if response_status == 302:
+    if received_state and received_state != expected_state:
         raise ValueError(
-            f"CLI hat den Code verarbeitet (302 ✓), aber keine gültigen Credentials gespeichert.\n"
-            f"{debug_info}\n"
-            "Mögliche Ursache: Token-Exchange mit Anthropic fehlgeschlagen."
-        )
-    elif response_status == 200:
-        raise ValueError(
-            f"CLI hat den Code verarbeitet (200 ✓), aber keine gültigen Credentials gespeichert.\n"
-            f"{debug_info}"
-        )
-    else:
-        raise ValueError(
-            f"Keine Credentials nach 90s Polling. CLI-Response-Status: {response_status}.\n"
-            f"{debug_info}"
+            "State-Parameter stimmt nicht überein — bitte die URL erneut kopieren "
+            "oder eine neue Nachricht schicken um den Flow neu zu starten."
         )
 
+    logger.info("Starting PKCE token exchange", code_len=len(code))
 
-def _credentials_debug_info() -> str:
-    """Return a debug string about the current credentials file state."""
-    if not _CREDENTIALS_FILE.exists():
-        return "Credentials-Datei existiert nicht."
-    try:
-        data = json.loads(_CREDENTIALS_FILE.read_text())
-        oauth = data.get("claudeAiOauth", {})
-        has_token = bool(oauth.get("accessToken"))
-        expires_at = oauth.get("expiresAt", 0)
-        now_ms = int(time.time() * 1000)
-        diff_s = (expires_at - now_ms) // 1000 if isinstance(expires_at, (int, float)) else "?"
-        return (
-            f"Credentials-Datei: access_token={'✓' if has_token else '✗'}, "
-            f"expiresAt={expires_at} (Typ: {type(expires_at).__name__}), "
-            f"läuft in {diff_s}s ab"
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(
+            _TOKEN_URL,
+            json={
+                "grant_type": "authorization_code",
+                "code": code,
+                "redirect_uri": _MANUAL_REDIRECT_URI,
+                "client_id": _CLIENT_ID,
+                "code_verifier": code_verifier,
+                "state": expected_state,
+            },
+            headers={"Content-Type": "application/json"},
+            timeout=aiohttp.ClientTimeout(total=30),
         )
-    except Exception as ex:
-        return f"Credentials-Datei fehlerhaft: {ex}"
+        if resp.status != 200:
+            body = await resp.text()
+            logger.error("Token exchange failed", status=resp.status, body=body[:400])
+            raise ValueError(
+                f"Token-Exchange fehlgeschlagen (HTTP {resp.status}):\n{body[:300]}"
+            )
+        token_data = await resp.json()
+
+    save_credentials(token_data)
+
+    if not is_authenticated():
+        # Credential file exists but fails validation — report details
+        try:
+            raw = json.loads(_CREDENTIALS_FILE.read_text())
+            oauth = raw.get("claudeAiOauth", {})
+            expires_at = oauth.get("expiresAt")
+            now_ms = int(time.time() * 1000)
+            raise ValueError(
+                f"Credentials gespeichert, aber ungültig.\n"
+                f"access_token: {'✓' if oauth.get('accessToken') else '✗'}, "
+                f"expiresAt: {expires_at} (now_ms={now_ms}, diff={((expires_at or 0) - now_ms) // 1000}s)"
+            )
+        except ValueError:
+            raise
+        except Exception as ex:
+            raise ValueError(f"Credentials gespeichert, aber Validierung fehlgeschlagen: {ex}")
+
+    logger.info("PKCE auth completed successfully")
