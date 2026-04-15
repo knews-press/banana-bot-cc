@@ -139,7 +139,7 @@ export function Sidebar({ instance, onMobileClose }: SidebarProps) {
           className="flex items-center gap-2"
         >
           {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img src="/icon.png" alt="logo" width={22} height={22} style={{ imageRendering: "pixelated", flexShrink: 0 }} />
+          <img src="/logo.png" alt="logo" width={22} height={22} style={{ imageRendering: "pixelated", flexShrink: 0 }} />
           <span className="text-[13px] font-semibold tracking-tight flex items-center gap-1.5" style={{ color: "var(--text)" }}>
             {instance}
             {!claudeReady && (
