@@ -342,17 +342,15 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
             return
 
         if not await ensure_authenticated():
-            from telegram import InlineKeyboardButton, InlineKeyboardMarkup
             auth_url, verifier = build_auth_url()
             context.user_data["pending_auth_code"] = {"verifier": verifier}
-            keyboard = InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔐 Bei Claude anmelden", url=auth_url)
-            ]])
             await update.message.reply_text(
                 "🔐 Claude ist noch nicht eingeloggt.\n\n"
-                "Klicke den Button, melde dich mit deinem Anthropic-Account an, "
-                "und schick mir den Code, der danach angezeigt wird.",
-                reply_markup=keyboard,
+                "Öffne diesen Link in deinem Browser "
+                "(wichtig: nicht im Telegram-Browser, sondern extern öffnen):\n\n"
+                f"{auth_url}\n\n"
+                "Melde dich an, bestätige die Autorisierung, "
+                "und schick mir den Code, der danach angezeigt wird."
             )
             return
         # ── End of Claude auth flow ────────────────────────────────────────
