@@ -20,10 +20,10 @@ logger = structlog.get_logger()
 
 # ── OAuth config (extracted from Claude Code CLI prod config) ──────────────────
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-_AUTH_URL = "https://platform.claude.com/oauth/authorize"
+_AUTH_URL = "https://claude.com/cai/oauth/authorize"
 _TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
 _MANUAL_REDIRECT_URL = "https://platform.claude.com/oauth/code/callback"
-_SCOPES = "user:inference user:profile user:sessions:claude_code user:mcp_servers user:file_upload"
+_SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
 _CREDENTIALS_FILE = Path("/root/.claude/.credentials.json")
 
@@ -112,6 +112,7 @@ def build_auth_url() -> tuple[str, str]:
     state = secrets.token_urlsafe(16)
 
     params = urllib.parse.urlencode({
+        "code": "true",
         "client_id": _CLIENT_ID,
         "response_type": "code",
         "redirect_uri": _MANUAL_REDIRECT_URL,
@@ -147,7 +148,10 @@ async def exchange_code(code: str, verifier: str) -> dict:
                 "client_id": _CLIENT_ID,
                 "code_verifier": verifier,
             },
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "anthropic-beta": "oauth-2025-04-20",
+            },
         )
         if resp.status != 200:
             text = await resp.text()
