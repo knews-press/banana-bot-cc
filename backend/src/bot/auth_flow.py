@@ -1,8 +1,14 @@
 """Interactive Claude OAuth login flow (PKCE) via Telegram.
 
 When Claude is not authenticated, the bot sends the user an authorization URL.
-The user clicks it, authenticates on claude.ai, and pastes the resulting code back.
-The bot then exchanges the code for tokens and saves them to ~/.claude/.credentials.json.
+The user clicks it, authenticates on claude.ai. After authorizing, the browser
+is redirected to http://localhost/callback?code=XXX — this shows a connection
+error, which is expected. The user copies the full URL from the address bar and
+pastes it back. The bot extracts the code and exchanges it for tokens.
+
+Background: https://claude.ai/oauth/claude-code-client-metadata confirms that the
+only registered redirect_uris for the claude.ai OAuth server are localhost URLs.
+The platform.claude.com manual callback is NOT registered on the claude.ai server.
 """
 
 import base64
@@ -18,11 +24,11 @@ import structlog
 
 logger = structlog.get_logger()
 
-# ── OAuth config (extracted from Claude Code CLI prod config) ──────────────────
+# ── OAuth config (from Claude Code CLI prod config) ────────────────────────────
 _CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 _AUTH_URL = "https://claude.com/cai/oauth/authorize"
-_TOKEN_URL = "https://claude.ai/v1/oauth/token"
-_MANUAL_REDIRECT_URL = "https://claude.ai/oauth/code/callback"
+_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+_MANUAL_REDIRECT_URL = "http://localhost/callback"
 _SCOPES = "user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
 _CREDENTIALS_FILE = Path("/root/.claude/.credentials.json")
@@ -66,12 +72,11 @@ async def try_refresh_token() -> bool:
         async with aiohttp.ClientSession() as session:
             resp = await session.post(
                 _TOKEN_URL,
-                data={
+                json={
                     "grant_type": "refresh_token",
                     "refresh_token": refresh_token,
                     "client_id": _CLIENT_ID,
                 },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
             )
             if resp.status != 200:
                 text = await resp.text()
@@ -97,11 +102,12 @@ async def ensure_authenticated() -> bool:
     return await try_refresh_token()
 
 
-def build_auth_url() -> tuple[str, str]:
+def build_auth_url() -> tuple[str, str, str]:
     """Generate PKCE pair and build OAuth authorization URL.
 
     Returns:
-        (url, code_verifier) – send url to user, keep verifier for exchange step.
+        (url, code_verifier, state) – send url to user, keep verifier and
+        state for the exchange step.
     """
     # PKCE
     verifier_bytes = secrets.token_bytes(32)
@@ -122,18 +128,39 @@ def build_auth_url() -> tuple[str, str]:
         "state": state,
     })
     url = f"{_AUTH_URL}?{params}"
-    return url, verifier
+    return url, verifier, state
 
 
-async def exchange_code(code: str, verifier: str) -> dict:
+def extract_code_from_input(user_input: str) -> str:
+    """Extract the authorization code from user input.
+
+    Accepts either:
+    - A full callback URL: http://localhost/callback?code=XXX&state=YYY
+    - A raw authorization code string
+    """
+    text = user_input.strip()
+    if text.startswith("http://localhost") or text.startswith("http://127.0.0.1"):
+        try:
+            parsed = urllib.parse.urlparse(text)
+            params = urllib.parse.parse_qs(parsed.query)
+            codes = params.get("code", [])
+            if codes:
+                return codes[0]
+        except Exception:
+            pass
+    return text
+
+
+async def exchange_code(code: str, verifier: str, state: str) -> dict:
     """Exchange authorization code for access/refresh tokens.
 
     Args:
-        code: The authorization code pasted by the user.
+        code: The authorization code extracted from the callback URL.
         verifier: The PKCE code_verifier generated in build_auth_url().
+        state: The state value generated in build_auth_url().
 
     Returns:
-        Token response dict from claude.ai.
+        Token response dict from platform.claude.com.
 
     Raises:
         ValueError: If the token exchange fails.
@@ -141,16 +168,13 @@ async def exchange_code(code: str, verifier: str) -> dict:
     async with aiohttp.ClientSession() as session:
         resp = await session.post(
             _TOKEN_URL,
-            data={
+            json={
                 "grant_type": "authorization_code",
                 "code": code.strip(),
                 "redirect_uri": _MANUAL_REDIRECT_URL,
                 "client_id": _CLIENT_ID,
                 "code_verifier": verifier,
-            },
-            headers={
-                "Content-Type": "application/x-www-form-urlencoded",
-                "anthropic-beta": "oauth-2025-04-20",
+                "state": state,
             },
         )
         if resp.status != 200:

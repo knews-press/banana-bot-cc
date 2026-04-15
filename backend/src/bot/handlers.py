@@ -21,7 +21,7 @@ from ..storage.uploads import UploadsStorage
 from ..tools.email import send_email
 from .media import MediaProcessor
 
-from .auth_flow import is_authenticated, ensure_authenticated, build_auth_url, exchange_code, save_credentials
+from .auth_flow import is_authenticated, ensure_authenticated, build_auth_url, exchange_code, extract_code_from_input, save_credentials
 from .commands.dispatch import (
     cmd_new, cmd_session, cmd_status, cmd_model_cmd, cmd_mode,
     cmd_me, cmd_memory_dispatch,
@@ -318,15 +318,16 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
         # ── Claude auth flow ───────────────────────────────────────────────
         pending_auth = context.user_data.get("pending_auth_code")
         if pending_auth:
-            # User is responding with the OAuth code
+            # User is responding with the callback URL (or raw code)
             if not msg.text:
-                await update.message.reply_text("Bitte schick mir den Code als Text.")
+                await update.message.reply_text("Bitte schick mir die URL als Text.")
                 return
-            code = msg.text.strip()
+            code = extract_code_from_input(msg.text)
             verifier = pending_auth["verifier"]
+            state = pending_auth["state"]
             status_msg = await update.message.reply_text("🔐 Code wird verarbeitet…")
             try:
-                token_data = await exchange_code(code, verifier)
+                token_data = await exchange_code(code, verifier, state)
                 save_credentials(token_data)
                 context.user_data.pop("pending_auth_code", None)
                 await status_msg.edit_text(
@@ -342,15 +343,16 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
             return
 
         if not await ensure_authenticated():
-            auth_url, verifier = build_auth_url()
-            context.user_data["pending_auth_code"] = {"verifier": verifier}
+            auth_url, verifier, state = build_auth_url()
+            context.user_data["pending_auth_code"] = {"verifier": verifier, "state": state}
             await update.message.reply_text(
                 "🔐 Claude ist noch nicht eingeloggt.\n\n"
-                "Öffne diesen Link in deinem Browser "
-                "(wichtig: nicht im Telegram-Browser, sondern extern öffnen):\n\n"
+                "Öffne diesen Link im Browser:\n\n"
                 f"{auth_url}\n\n"
-                "Melde dich an, bestätige die Autorisierung, "
-                "und schick mir den Code, der danach angezeigt wird."
+                "Nach der Autorisierung leitet dich der Browser auf "
+                "http://localhost/callback?code=... weiter — das zeigt einen "
+                "Verbindungsfehler, das ist normal.\n\n"
+                "Kopiere die vollständige URL aus der Adresszeile und schick sie mir."
             )
             return
         # ── End of Claude auth flow ────────────────────────────────────────
