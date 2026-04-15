@@ -21,7 +21,11 @@ from ..storage.uploads import UploadsStorage
 from ..tools.email import send_email
 from .media import MediaProcessor
 
-from .auth_flow import is_authenticated, ensure_authenticated, build_auth_url, exchange_code, extract_code_from_input, save_credentials
+from .auth_flow import (
+    is_authenticated, ensure_authenticated,
+    start_cli_auth, complete_cli_auth,
+    save_credentials,
+)
 from .commands.dispatch import (
     cmd_new, cmd_session, cmd_status, cmd_model_cmd, cmd_mode,
     cmd_me, cmd_memory_dispatch,
@@ -318,40 +322,60 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
         # ── Claude auth flow ───────────────────────────────────────────────
         pending_auth = context.user_data.get("pending_auth_code")
         if pending_auth:
-            # User is responding with the callback URL (or raw code)
             if not msg.text:
-                await update.message.reply_text("Bitte schick mir die URL als Text.")
+                await update.message.reply_text(
+                    "Bitte schick mir die vollständige URL aus der Adresszeile."
+                )
                 return
-            code = extract_code_from_input(msg.text)
-            verifier = pending_auth["verifier"]
-            state = pending_auth["state"]
-            status_msg = await update.message.reply_text("🔐 Code wird verarbeitet…")
+            callback_url = msg.text.strip()
+            if not (callback_url.startswith("http://localhost")
+                    or callback_url.startswith("http://127.0.0.1")):
+                await update.message.reply_text(
+                    "Bitte die vollständige URL aus der Adresszeile schicken "
+                    "(beginnt mit http://localhost:...)."
+                )
+                return
+            port = pending_auth["port"]
+            proc = pending_auth["proc"]
+            status_msg = await update.message.reply_text("🔐 Verarbeite Autorisierung…")
             try:
-                token_data = await exchange_code(code, verifier, state)
-                save_credentials(token_data)
+                ok = await complete_cli_auth(callback_url, port, proc)
                 context.user_data.pop("pending_auth_code", None)
-                await status_msg.edit_text(
-                    "✅ Claude erfolgreich authentifiziert! Du kannst jetzt loslegen."
-                )
+                if ok:
+                    await status_msg.edit_text(
+                        "✅ Claude erfolgreich authentifiziert! Du kannst jetzt loslegen."
+                    )
+                else:
+                    await status_msg.edit_text(
+                        "❌ Credentials wurden nicht gespeichert. Bitte erneut versuchen."
+                    )
             except Exception as e:
-                logger.error("Auth code exchange failed", error=str(e))
-                await status_msg.edit_text(
-                    f"❌ Authentifizierung fehlgeschlagen: {e}\n\n"
-                    "Bitte versuche es erneut oder schick eine neue Nachricht um einen neuen Link zu erhalten."
-                )
+                logger.error("CLI auth completion failed", error=str(e))
+                await status_msg.edit_text(f"❌ Fehler: {e}")
                 context.user_data.pop("pending_auth_code", None)
             return
 
         if not await ensure_authenticated():
-            auth_url, verifier, state = build_auth_url()
-            context.user_data["pending_auth_code"] = {"verifier": verifier, "state": state}
-            await update.message.reply_text(
-                "🔐 Claude ist noch nicht eingeloggt.\n\n"
-                "Öffne diesen Link im Browser:\n\n"
-                f"{auth_url}\n\n"
-                "Melde dich an, bestätige die Autorisierung, "
-                "und schick mir den Code, der danach angezeigt wird."
+            status_msg = await update.message.reply_text(
+                "🔐 Starte Claude-Authentifizierung…"
             )
+            try:
+                auth_url, port, proc = await start_cli_auth()
+                context.user_data["pending_auth_code"] = {"port": port, "proc": proc}
+                await status_msg.edit_text(
+                    "🔐 Claude ist noch nicht eingeloggt.\n\n"
+                    "Öffne diesen Link im Browser:\n\n"
+                    f"{auth_url}\n\n"
+                    "Nach der Autorisierung leitet dich der Browser auf "
+                    f"http://localhost:{port}/callback?code=... weiter — "
+                    "das zeigt einen Verbindungsfehler, das ist normal.\n\n"
+                    "Kopiere die vollständige URL aus der Adresszeile und schick sie mir."
+                )
+            except Exception as e:
+                logger.error("CLI auth start failed", error=str(e))
+                await status_msg.edit_text(
+                    f"❌ Fehler beim Starten der Authentifizierung: {e}"
+                )
             return
         # ── End of Claude auth flow ────────────────────────────────────────
 

@@ -1,20 +1,13 @@
-"""Interactive Claude OAuth login flow (PKCE) via Telegram.
+"""Interactive Claude auth flow via CLI subprocess.
 
-When Claude is not authenticated, the bot sends the user an authorization URL.
-The user clicks it, authenticates on claude.ai. After authorizing, the browser
-is redirected to http://localhost/callback?code=XXX — this shows a connection
-error, which is expected. The user copies the full URL from the address bar and
-pastes it back. The bot extracts the code and exchanges it for tokens.
-
-Background: https://claude.ai/oauth/claude-code-client-metadata confirms that the
-only registered redirect_uris for the claude.ai OAuth server are localhost URLs.
-The platform.claude.com manual callback is NOT registered on the claude.ai server.
+When Claude is not authenticated, the bot launches `claude auth login`,
+captures its local server port, sends Kevin the browser auth URL, and when
+Kevin pastes back the localhost callback URL (which his browser can't reach),
+the bot makes the internal HTTP request to the CLI's local server on that port.
 """
 
-import base64
-import hashlib
+import asyncio
 import json
-import secrets
 import time
 import urllib.parse
 from pathlib import Path
@@ -24,14 +17,12 @@ import structlog
 
 logger = structlog.get_logger()
 
-# ── OAuth config (from Claude Code CLI prod config) ────────────────────────────
-_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-_AUTH_URL = "https://platform.claude.com/oauth/authorize"
-_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-_MANUAL_REDIRECT_URL = "https://platform.claude.com/oauth/code/callback"
-_SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
-
 _CREDENTIALS_FILE = Path("/root/.claude/.credentials.json")
+
+# Token URL used for refresh only
+_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
+_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+_SCOPES = "org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload"
 
 
 def is_authenticated() -> bool:
@@ -102,88 +93,6 @@ async def ensure_authenticated() -> bool:
     return await try_refresh_token()
 
 
-def build_auth_url() -> tuple[str, str, str]:
-    """Generate PKCE pair and build OAuth authorization URL.
-
-    Returns:
-        (url, code_verifier, state) – send url to user, keep verifier and
-        state for the exchange step.
-    """
-    # PKCE
-    verifier_bytes = secrets.token_bytes(32)
-    verifier = base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode()
-    digest = hashlib.sha256(verifier.encode()).digest()
-    challenge = base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
-
-    state = secrets.token_urlsafe(16)
-
-    params = urllib.parse.urlencode({
-        "code": "true",
-        "client_id": _CLIENT_ID,
-        "response_type": "code",
-        "redirect_uri": _MANUAL_REDIRECT_URL,
-        "scope": _SCOPES,
-        "code_challenge": challenge,
-        "code_challenge_method": "S256",
-        "state": state,
-    })
-    url = f"{_AUTH_URL}?{params}"
-    return url, verifier, state
-
-
-def extract_code_from_input(user_input: str) -> str:
-    """Extract the authorization code from user input.
-
-    Accepts either:
-    - A full callback URL: http://localhost/callback?code=XXX&state=YYY
-    - A raw authorization code string
-    """
-    text = user_input.strip()
-    if text.startswith("http://localhost") or text.startswith("http://127.0.0.1"):
-        try:
-            parsed = urllib.parse.urlparse(text)
-            params = urllib.parse.parse_qs(parsed.query)
-            codes = params.get("code", [])
-            if codes:
-                return codes[0]
-        except Exception:
-            pass
-    return text
-
-
-async def exchange_code(code: str, verifier: str, state: str) -> dict:
-    """Exchange authorization code for access/refresh tokens.
-
-    Args:
-        code: The authorization code extracted from the callback URL.
-        verifier: The PKCE code_verifier generated in build_auth_url().
-        state: The state value generated in build_auth_url().
-
-    Returns:
-        Token response dict from platform.claude.com.
-
-    Raises:
-        ValueError: If the token exchange fails.
-    """
-    async with aiohttp.ClientSession() as session:
-        resp = await session.post(
-            _TOKEN_URL,
-            json={
-                "grant_type": "authorization_code",
-                "code": code.strip(),
-                "redirect_uri": _MANUAL_REDIRECT_URL,
-                "client_id": _CLIENT_ID,
-                "code_verifier": verifier,
-                "state": state,
-            },
-        )
-        if resp.status != 200:
-            text = await resp.text()
-            logger.error("Token exchange failed", status=resp.status, body=text[:300])
-            raise ValueError(f"Token-Austausch fehlgeschlagen ({resp.status}): {text[:200]}")
-        return await resp.json()
-
-
 def save_credentials(token_data: dict) -> None:
     """Write tokens to ~/.claude/.credentials.json.
 
@@ -210,3 +119,144 @@ def save_credentials(token_data: dict) -> None:
 
     _CREDENTIALS_FILE.write_text(json.dumps(existing, indent=2))
     logger.info("Claude credentials saved", path=str(_CREDENTIALS_FILE))
+
+
+def _get_listening_ports() -> set[int]:
+    """Return all ports currently in TCP LISTEN state."""
+    ports = set()
+    for path in ['/proc/net/tcp', '/proc/net/tcp6']:
+        try:
+            with open(path, 'r') as f:
+                for line in f.readlines()[1:]:
+                    parts = line.split()
+                    if len(parts) >= 4 and parts[3] == '0A':  # LISTEN
+                        port_hex = parts[1].split(':')[1]
+                        ports.add(int(port_hex, 16))
+        except Exception:
+            pass
+    return ports
+
+
+async def start_cli_auth() -> tuple[str, int, asyncio.subprocess.Process]:
+    """
+    Launch 'claude auth login', detect its local server port, and return
+    (browser_auth_url, port, process).
+
+    browser_auth_url uses http://localhost:{port}/callback so Kevin's browser
+    redirects there after authorization. Kevin copies the full URL from the
+    address bar (connection refused is expected) and sends it back.
+    """
+    import os
+    ports_before = _get_listening_ports()
+
+    env = {**os.environ, 'NO_COLOR': '1', 'TERM': 'dumb'}
+    proc = await asyncio.create_subprocess_exec(
+        'claude', 'auth', 'login',
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+        env=env,
+    )
+
+    # Read until CLI prints the "visit:" line with the manual URL
+    manual_url = None
+    try:
+        async def _read_url():
+            nonlocal manual_url
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+                text = line.decode('utf-8', errors='replace').strip()
+                logger.debug("claude auth login", line=text)
+                if 'visit:' in text.lower():
+                    manual_url = text.split('visit:', 1)[1].strip()
+                    return
+        await asyncio.wait_for(_read_url(), timeout=20)
+    except asyncio.TimeoutError:
+        proc.kill()
+        raise ValueError("Timeout: CLI hat keine Auth-URL ausgegeben (20s)")
+
+    if not manual_url:
+        proc.kill()
+        raise ValueError("CLI hat die Auth-URL nicht ausgegeben")
+
+    # Give the server a moment to bind, then detect new listening port
+    await asyncio.sleep(1.0)
+    ports_after = _get_listening_ports()
+    new_ports = ports_after - ports_before
+
+    if not new_ports:
+        proc.kill()
+        raise ValueError("Konnte den CLI-Port nicht ermitteln")
+
+    port = max(new_ports)
+    logger.info("CLI local server detected", port=port)
+
+    # Construct browser URL: same params as manual URL but with localhost redirect
+    try:
+        parsed = urllib.parse.urlparse(manual_url)
+        params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+        params['redirect_uri'] = [f'http://localhost:{port}/callback']
+        new_query = urllib.parse.urlencode({k: v[0] for k, v in params.items()})
+        browser_url = f"https://claude.com/cai/oauth/authorize?{new_query}"
+    except Exception as e:
+        proc.kill()
+        raise ValueError(f"URL-Konstruktion fehlgeschlagen: {e}")
+
+    # Drain stdout in background to prevent buffer blocking
+    async def _drain():
+        try:
+            while True:
+                line = await proc.stdout.readline()
+                if not line:
+                    break
+        except Exception:
+            pass
+    asyncio.ensure_future(_drain())
+
+    return browser_url, port, proc
+
+
+async def complete_cli_auth(
+    callback_url: str,
+    port: int,
+    proc: asyncio.subprocess.Process,
+) -> bool:
+    """
+    Forward Kevin's callback URL to the CLI's local server (same container).
+    The CLI exchanges the code and saves credentials to ~/.claude/.credentials.json.
+
+    Returns True if credentials were saved successfully.
+    """
+    parsed = urllib.parse.urlparse(callback_url.strip())
+    internal_url = f"http://localhost:{port}/callback"
+    if parsed.query:
+        internal_url += f"?{parsed.query}"
+
+    logger.info("Forwarding callback to CLI server", url=internal_url)
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            await session.get(
+                internal_url,
+                timeout=aiohttp.ClientTimeout(total=15),
+                allow_redirects=False,
+            )
+        except aiohttp.ClientConnectionError:
+            pass  # CLI closes connection after processing — expected
+        except Exception as e:
+            logger.warning("Callback forwarding error", error=str(e))
+
+    # Poll for credentials (up to 10s)
+    for _ in range(20):
+        await asyncio.sleep(0.5)
+        if is_authenticated():
+            logger.info("CLI auth: credentials saved")
+            break
+
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+    return is_authenticated()
