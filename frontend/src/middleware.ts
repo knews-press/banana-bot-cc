@@ -11,7 +11,8 @@ export async function middleware(request: NextRequest) {
   if (
     pathname.startsWith("/api/") ||
     pathname.startsWith("/_next/") ||
-    pathname === "/favicon.ico"
+    pathname === "/favicon.ico" ||
+    /\.(?:png|jpe?g|gif|svg|ico|webp|woff2?|ttf|eot|otf|mp4|webm|avif)$/i.test(pathname)
   ) {
     return NextResponse.next();
   }
