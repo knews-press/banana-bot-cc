@@ -19,8 +19,6 @@ Everything runs on your own server via Docker Compose. No data leaves your infra
 
 ## Features
 
-## Features
-
 | | |
 |---|---|
 | 🤖 **Telegram Bot** | Chat with Claude Code via Telegram — sessions, tools, extended thinking |
@@ -178,18 +176,6 @@ volumes:
 ```
 
 > ⚠️ Use `/mode approve` if you want to review tool calls before Claude executes them.
-
-## Contributing
-
-Pull requests are welcome. For larger changes, please open an issue first.
-
-```bash
-# Development setup
-git clone https://github.com/knews-press/banana-bot-cc.git
-cd banana-bot-cc
-cp .env.example .env
-docker compose up -d
-```
 
 ## License
 
