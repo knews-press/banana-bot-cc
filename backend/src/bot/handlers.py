@@ -6,7 +6,7 @@ import re
 
 import telegramify_markdown
 import structlog
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ChatAction, ParseMode
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
@@ -356,13 +356,15 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
                     "code_verifier": code_verifier,
                     "state": state,
                 }
+                keyboard = InlineKeyboardMarkup([[
+                    InlineKeyboardButton(text="🔐 Jetzt autorisieren", url=auth_url),
+                ]])
                 await update.message.reply_text(
                     "🔐 Claude ist noch nicht eingeloggt.\n\n"
-                    "1. Öffne diesen Link im Browser:\n\n"
-                    f"{auth_url}\n\n"
-                    "2. Melde dich an und autorisiere den Zugriff.\n\n"
-                    "3. Anthropic zeigt dir einen Code an — kopiere alles und schick es mir\n"
-                    "   (falls ein # vorkommt, reicht auch nur der Teil davor)."
+                    "Klicke auf den Button, melde dich bei Anthropic an und autorisiere den Zugriff.\n\n"
+                    "Anthropic zeigt dir danach einen Code an — kopiere alles und schick es mir "
+                    "(falls ein # vorkommt, reicht auch nur der Teil davor).",
+                    reply_markup=keyboard,
                 )
             except Exception as e:
                 logger.error("PKCE auth start failed", error=str(e))

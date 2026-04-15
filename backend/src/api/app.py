@@ -18,6 +18,7 @@ from .routes.graph import router as graph_router
 from .routes.memories import router as memories_router
 from .routes.preferences import router as preferences_router
 from .routes.auth import router as auth_router
+from .routes.claude_auth import router as claude_auth_router
 from .routes.commands import router as commands_router
 
 logger = structlog.get_logger()
@@ -59,6 +60,7 @@ def create_api(
     app.include_router(commands_router, prefix="/api/v1", tags=["commands"])
     app.include_router(graph_router, prefix="/api/v1", tags=["graph"])
     app.include_router(memories_router, prefix="/api/v1", tags=["memories"])
+    app.include_router(claude_auth_router, prefix="/api/v1", tags=["claude-auth"])
 
     @app.get("/healthz")
     async def healthz():

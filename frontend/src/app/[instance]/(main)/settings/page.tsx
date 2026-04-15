@@ -686,9 +686,204 @@ function NutzerTab({ instance }: { instance: string }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════
+// CLAUDE TAB
+// ══════════════════════════════════════════════════════════════════════════
+type ClaudeAuthState =
+  | { step: "idle" }
+  | { step: "loading" }
+  | { step: "awaiting_code"; auth_url: string; flow_id: string }
+  | { step: "completing" }
+  | { step: "done" }
+  | { step: "error"; message: string };
+
+function ClaudeTab({ instance }: { instance: string }) {
+  const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [state, setState] = useState<ClaudeAuthState>({ step: "idle" });
+  const [code, setCode] = useState("");
+
+  // Load current auth status on mount
+  useEffect(() => {
+    fetch(`/api/${instance}/claude-auth/status`)
+      .then((r) => r.ok ? r.json() : null)
+      .then((d) => setAuthenticated(d?.authenticated ?? false))
+      .catch(() => setAuthenticated(false));
+  }, [instance]);
+
+  const startAuth = async () => {
+    setState({ step: "loading" });
+    try {
+      const res = await fetch(`/api/${instance}/claude-auth/start`, { method: "POST" });
+      if (!res.ok) throw new Error((await res.json()).error ?? "Unbekannter Fehler");
+      const { flow_id, auth_url } = await res.json();
+      setState({ step: "awaiting_code", auth_url, flow_id });
+    } catch (e) {
+      setState({ step: "error", message: String(e) });
+    }
+  };
+
+  const completeAuth = async () => {
+    if (state.step !== "awaiting_code") return;
+    const trimmed = code.trim();
+    if (!trimmed) return;
+    const { flow_id } = state;
+    setState({ step: "completing" });
+    try {
+      const res = await fetch(`/api/${instance}/claude-auth/complete`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ flow_id, code: trimmed }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? data.detail ?? "Unbekannter Fehler");
+      setAuthenticated(true);
+      setCode("");
+      setState({ step: "done" });
+    } catch (e) {
+      setState({ step: "error", message: String(e) });
+    }
+  };
+
+  const reset = () => {
+    setState({ step: "idle" });
+    setCode("");
+  };
+
+  const btnClass =
+    "flex items-center gap-2 px-4 py-2 rounded-md text-[13px] font-medium transition-colors disabled:opacity-40";
+  const btnStyle = {
+    backgroundColor: "var(--bg-muted)",
+    color: "var(--text)",
+    border: "1px solid var(--border)",
+  };
+
+  return (
+    <div className="max-w-md space-y-6">
+      {/* Status badge */}
+      <div className="py-5" style={{ borderTop: "1px solid var(--border)" }}>
+        <h3 className="text-[13px] font-medium mb-3" style={{ color: "var(--text-2)" }}>
+          Claude Authentication
+        </h3>
+        <div className="flex items-center gap-2 text-[13px]">
+          {authenticated === null ? (
+            <Spinner className="h-3.5 w-3.5" />
+          ) : authenticated ? (
+            <>
+              <span style={{ color: "var(--success)" }}>●</span>
+              <span style={{ color: "var(--text-2)" }}>Authentifiziert</span>
+            </>
+          ) : (
+            <>
+              <span style={{ color: "var(--danger)" }}>●</span>
+              <span style={{ color: "var(--text-2)" }}>Nicht eingeloggt</span>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Auth flow */}
+      {!authenticated && state.step === "idle" && (
+        <button onClick={startAuth} className={btnClass} style={btnStyle}>
+          🔐 Login-Flow starten
+        </button>
+      )}
+
+      {state.step === "loading" && (
+        <div className="flex items-center gap-2 text-[13px]" style={{ color: "var(--text-3)" }}>
+          <Spinner className="h-3.5 w-3.5" /> Generiere Auth-URL…
+        </div>
+      )}
+
+      {state.step === "awaiting_code" && (
+        <div className="space-y-4">
+          <p className="text-[13px]" style={{ color: "var(--text-2)" }}>
+            Öffne den Link, melde dich bei Anthropic an und autorisiere den Zugriff.
+            Anthropic zeigt dir danach einen Code — kopiere ihn und füge ihn hier ein.
+          </p>
+          <a
+            href={state.auth_url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className={btnClass}
+            style={{ ...btnStyle, display: "inline-flex", textDecoration: "none" }}
+          >
+            🔗 Anthropic öffnen
+          </a>
+          <div className="space-y-2">
+            <label className="text-[13px] font-medium" style={{ color: "var(--text-2)" }}>
+              Code eingeben
+            </label>
+            <input
+              type="text"
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && completeAuth()}
+              placeholder="Code von Anthropic…"
+              className="w-full px-3 py-2 rounded-md text-[13px] font-mono"
+              style={{
+                backgroundColor: "var(--bg-muted)",
+                color: "var(--text)",
+                border: "1px solid var(--border)",
+                outline: "none",
+              }}
+              autoFocus
+            />
+          </div>
+          <div className="flex items-center gap-3">
+            <button
+              onClick={completeAuth}
+              disabled={!code.trim()}
+              className={btnClass}
+              style={btnStyle}
+            >
+              ✓ Bestätigen
+            </button>
+            <button
+              onClick={reset}
+              className="text-[13px] px-3 py-2"
+              style={{ color: "var(--text-3)" }}
+            >
+              Abbrechen
+            </button>
+          </div>
+        </div>
+      )}
+
+      {state.step === "completing" && (
+        <div className="flex items-center gap-2 text-[13px]" style={{ color: "var(--text-3)" }}>
+          <Spinner className="h-3.5 w-3.5" /> Tausche Code gegen Token…
+        </div>
+      )}
+
+      {state.step === "done" && (
+        <p className="text-[13px]" style={{ color: "var(--success)" }}>
+          ✓ Claude erfolgreich authentifiziert!
+        </p>
+      )}
+
+      {state.step === "error" && (
+        <div className="space-y-3">
+          <p className="text-[13px]" style={{ color: "var(--danger)" }}>
+            ❌ {state.message}
+          </p>
+          <button onClick={reset} className={btnClass} style={btnStyle}>
+            Erneut versuchen
+          </button>
+        </div>
+      )}
+
+      {authenticated && state.step !== "done" && (
+        <button onClick={startAuth} className={btnClass} style={{ ...btnStyle, opacity: 0.6 }}>
+          🔄 Token erneuern
+        </button>
+      )}
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════
 // MAIN PAGE
 // ══════════════════════════════════════════════════════════════════════════
-type Tab = "stats" | "nutzer";
+type Tab = "stats" | "nutzer" | "claude";
 
 function SettingsContent() {
   const { instance } = useParams<{ instance: string }>();
@@ -701,6 +896,7 @@ function SettingsContent() {
   const tabs: { id: Tab; label: string }[] = [
     { id: "stats", label: "Statistics" },
     { id: "nutzer", label: "User" },
+    { id: "claude", label: "Claude" },
   ];
 
   return (
@@ -734,6 +930,7 @@ function SettingsContent() {
         {/* Tab content */}
         {tab === "stats" && <StatsTab instance={instance} />}
         {tab === "nutzer" && <NutzerTab instance={instance} />}
+        {tab === "claude" && <ClaudeTab instance={instance} />}
       </div>
     </div>
   );

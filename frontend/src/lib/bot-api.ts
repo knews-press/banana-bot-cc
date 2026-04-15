@@ -217,4 +217,27 @@ export class BotApiClient {
       body: JSON.stringify(body),
     });
   }
+
+  // ── Claude Auth ────────────────────────────────────────────────────────
+
+  async getClaudeAuthStatus(): Promise<Response> {
+    return fetch(`${this.baseUrl}/api/v1/claude-auth/status`, {
+      headers: this.headers(),
+    });
+  }
+
+  async startClaudeAuth(): Promise<Response> {
+    return fetch(`${this.baseUrl}/api/v1/claude-auth/start`, {
+      method: "POST",
+      headers: this.headers(),
+    });
+  }
+
+  async completeClaudeAuth(flowId: string, code: string): Promise<Response> {
+    return fetch(`${this.baseUrl}/api/v1/claude-auth/complete`, {
+      method: "POST",
+      headers: this.headers(),
+      body: JSON.stringify({ flow_id: flowId, code }),
+    });
+  }
 }
