@@ -172,6 +172,12 @@ async def complete_pkce_auth(
     Raises ValueError with a descriptive message on failure.
     """
     user_input = user_input.strip()
+
+    # Anthropic's callback page displays "code#state" as a combined string.
+    # Strip the fragment (everything from '#' onwards) to get the bare code.
+    if "#" in user_input and not user_input.startswith("http"):
+        user_input = user_input.split("#")[0].strip()
+
     code = user_input
     received_state: str | None = None
 

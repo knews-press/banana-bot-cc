@@ -361,7 +361,8 @@ def setup_handlers(app, settings: Settings, claude: ClaudeClient,
                     "1. Öffne diesen Link im Browser:\n\n"
                     f"{auth_url}\n\n"
                     "2. Melde dich an und autorisiere den Zugriff.\n\n"
-                    "3. Anthropic zeigt dir einen Code an — kopiere ihn und schick ihn mir."
+                    "3. Anthropic zeigt dir einen Code an — kopiere alles und schick es mir\n"
+                    "   (falls ein # vorkommt, reicht auch nur der Teil davor)."
                 )
             except Exception as e:
                 logger.error("PKCE auth start failed", error=str(e))
